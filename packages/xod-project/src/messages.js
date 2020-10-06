@@ -164,10 +164,10 @@ export default {
       'Remove the not-implemented-in-xod node or remove a record marker node',
     trace,
   }),
-  RECORD_PATCH_MUST_HAVE_AT_LEASE_TWO_INPUTS: ({ trace }) => ({
+  RECORD_PATCH_MUST_HAVE_AT_LEAST_ONE_INPUT: ({ trace }) => ({
     title: 'Invalid record patch',
-    note: 'Record patch must have at least two inputs',
-    solution: 'Add more input terminals',
+    note: 'Record patch must have at least one input',
+    solution: 'Add input terminals',
     trace,
   }),
   RECORD_PATCH_CANT_STORE_PULSES: ({ trace }) => ({
