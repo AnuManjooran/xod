@@ -16,6 +16,7 @@ import {
   failOnFalse,
   failOnNothing,
   prependTraceToError,
+  mapIndexed,
 } from 'xod-func-tools';
 
 import * as CONST from './constants';
@@ -196,6 +197,12 @@ const generateCustomTypeTerminalDescription = (constructorPath, direction) =>
     'Horizontal position relative to other terminals defines the pin order',
   ]);
 
+const getGenuinePatches = R.prop('patches');
+
+const getGenuinePatchByPath = R.curry((patchPath, project) =>
+  R.compose(R.prop(patchPath), getGenuinePatches)(project)
+);
+
 // :: Project -> Map PatchPath Patch
 const getPatches = memoizeOnlyLast(project => {
   // those are not built-in or auto-generated patches
@@ -229,6 +236,7 @@ const getPatches = memoizeOnlyLast(project => {
         CONST.PIN_DIRECTION.INPUT,
         type
       );
+      const basename = PatchPathUtils.getBaseName(type);
 
       const nodesForUnpackPatch = R.compose(
         R.reject(R.isNil),
@@ -272,7 +280,150 @@ const getPatches = memoizeOnlyLast(project => {
         Patch.setPatchPath(PatchPathUtils.getUnpackRecordPath(type)),
         Patch.createPatch
       )();
-      return [recordPatch, unpackPatch];
+
+      // TODO: hasPatch defined after because it uses `getPatches`...
+      // if (!hasPatch(PatchPathUtils.getToJsonRecordPath(type), project)) {
+      const toJsonPatch = genuinePatches[PatchPathUtils.getToJsonRecordPath(type)]
+        ? null
+        : (() => {
+            // Note:
+            // unpack-record output pin keys is equal to input pins of a record
+            // so it might be used as is to generate `to-json(record)` patch
+            const recordPins = R.compose(
+              Pin.normalizeEmptyPinLabels,
+              Patch.listPins
+            )(recordPatch);
+
+            const recordInputPins = R.filter(Pin.isInputPin, recordPins);
+            const recordOutputPin = R.find(Pin.isOutputPin, recordPins);
+
+            // TODO: Move it to constants.
+            //       Or think how to avoid depending xod-project on `xod/json` library
+            const TO_JSON_ABSTRACT_PATCH_PATH = 'xod/json/to-json';
+            const CONCAT_PATCH_PATH = 'xod/core/concat';
+            // TODO: Make it bulletproof without hard-coding pin keys!
+            const TO_JSON_INPUT_PIN_KEY = 'SJpDQonLw';
+            const TO_JSON_OUTPUT_PIN_KEY = 'rk7uQih8v';
+            const concatFirstPinKey = 'Hkqu9oaWb';
+            const concatVariadicPinKey = 'BkeKcj6ZZ';
+            const concatOutputPinKey = 'rksccsp-W';
+            // const [concatFirstPinKey, concatVariadicPinKey] = R.compose(
+            //   R.map(Pin.getPinKey),
+            //   Patch.listInputPins,
+            //   getPatchByPathUnsafe
+            // )(CONCAT_PATCH_PATH, project);
+
+            // :: [Node]
+            const nodesForToJsonPatch = [
+              // Input terminal
+              R.compose(
+                Node.setNodeId(`input-${basename}`),
+                Node.createNode({ x: 0, y: 0 })
+              )(inputTypeTerminal),
+              // Unpack
+              R.compose(
+                Node.setNodeId(`unpack-${basename}`),
+                Node.createNode({ x: 0, y: 1 }),
+                PatchPathUtils.getUnpackRecordPath
+              )(type),
+              // Abstract to-json for each output of unpack node
+              ...mapIndexed((_, idx) =>
+                R.compose(
+                  Node.setNodeId(`toJson-${idx}`),
+                  Node.createNode({ x: (idx + 1) * 3 - 1, y: 2 })
+                )(TO_JSON_ABSTRACT_PATCH_PATH)
+              )(recordInputPins),
+              // Concat
+              R.compose(
+                R.addIndex(R.reduce)(
+                  (node, pin, idx) => {
+                    const keyPinKey =
+                      idx === 0
+                        ? concatVariadicPinKey
+                        : Pin.addVariadicPinKeySuffix(
+                            idx * 3,
+                            concatVariadicPinKey
+                          );
+
+                    const thirdPinKey = Pin.addVariadicPinKeySuffix(
+                      (idx + 1) * 3 - 1,
+                      concatVariadicPinKey
+                    );
+                    return R.compose(
+                      Node.setBoundValue(
+                        thirdPinKey,
+                        idx === recordInputPins.length - 1 ? '"}"' : '","'
+                      ),
+                      Node.setBoundValue(
+                        keyPinKey,
+                        `""${Pin.getPinLabel(pin)}":"`
+                      )
+                    )(node);
+                  },
+                  R.__,
+                  recordInputPins
+                ),
+                Node.setBoundValue(concatFirstPinKey, '"{"'),
+                Node.setNodeArityLevel((recordPins.length - 1) * 3),
+                Node.setNodeId('concat'),
+                Node.createNode({ x: 0, y: 3 })
+              )(CONCAT_PATCH_PATH),
+              // Output string
+              R.compose(
+                Node.setNodeId('output-json-string'),
+                Node.createNode({ x: 0, y: 4 }),
+                PatchPathUtils.getTerminalPath
+              )(CONST.PIN_DIRECTION.OUTPUT, CONST.PIN_TYPE.STRING),
+            ];
+
+            const linksForToJsonPatch = [
+              // input -> unpack
+              Link.createLink(
+                Pin.getPinKey(recordOutputPin), // input of unpack
+                `unpack-${basename}`,
+                CONST.TERMINAL_PIN_KEYS[CONST.PIN_DIRECTION.OUTPUT],
+                `input-${basename}`
+              ),
+              // unpack -> to-json (for each)
+              ...mapIndexed((pin, idx) =>
+                Link.createLink(
+                  TO_JSON_INPUT_PIN_KEY,
+                  `toJson-${idx}`,
+                  Pin.getPinKey(pin),
+                  `unpack-${basename}`
+                )
+              )(recordInputPins),
+              // to-json -> concat (for each)
+              ...mapIndexed((pin, idx) =>
+                Link.createLink(
+                  Pin.addVariadicPinKeySuffix(
+                    (idx + 1) * 3 - 2,
+                    concatVariadicPinKey
+                  ),
+                  'concat',
+                  TO_JSON_OUTPUT_PIN_KEY,
+                  `toJson-${idx}`
+                )
+              )(recordInputPins),
+              // concat -> output
+              Link.createLink(
+                CONST.TERMINAL_PIN_KEYS[CONST.PIN_DIRECTION.INPUT],
+                'output-json-string',
+                concatOutputPinKey,
+                'concat'
+              ),
+            ];
+
+            return R.compose(
+              Patch.upsertLinks(linksForToJsonPatch),
+              Patch.upsertNodes(nodesForToJsonPatch),
+              Patch.setPatchPath(PatchPathUtils.getToJsonRecordPath(type)),
+              Patch.createPatch
+            )();
+          })();
+
+      // TODO
+      return R.reject(R.isNil, [recordPatch, unpackPatch, toJsonPatch]);
     }),
     R.values,
     R.filter(Patch.isRecordPatch)
